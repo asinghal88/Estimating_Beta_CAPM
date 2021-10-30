@@ -1,0 +1,532 @@
+---
+title: "Estimating_Beta_CAPM"
+author: "Anshul Singhal"
+date: "10/11/2021"
+output: github_document
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+###Loading the Packages which are required
+```{r include = FALSE}
+library(dplyr)
+require(data.table)
+library(haven)
+library(zeallot)
+library(lubridate)
+library(plotly)
+library(openxlsx)
+library(readxl)
+library(zoo)
+library(scales)
+library(geckor)
+library(fredr)
+library(tidyquant)
+library(tidyr)
+library(naniar)
+library(tidyverse)
+library(forestmangr)
+library(tibbletime)
+library(lmtest)
+library(sandwich)
+fredr_set_key("669c24e3e2c8136b6db6b3c978104993")
+```
+
+###Functions Used in the Code
+```{r}
+#Some of the functions are taken from the previous assignments
+#Daily Betas for Q1
+beta_daily_function = function(data,x,y, col_name) {
+          
+    data <-  data %>%
+              group_by(CUSIP,BK_START) %>%
+              summarise(Cor = cov(!!sym(x), !!sym(y))/var(!!sym(y)))
+    names(data)[3] = col_name
+    data
+}
+#Monthly Beta for Q2
+rolling_function = function(x,y,z){
+  rolling_beta <- rollify(function(x, y) {
+                         cov(x,y)/var(y)
+                       },
+                       window = z)
+  rolling_beta(x,y)
+}
+
+#monthly beta calculation function
+beta_calculation = function(data,window){
+  
+  stock_data_modified = data%>%
+  group_by(CUSIP)%>%
+  filter(n() >= window)%>%
+  arrange(DATE_START)%>%
+  mutate(roll_beta = lag(rolling_function(RET,VWRETD,window)))%>%
+  group_by(DATE_START)%>% 
+  filter(month(DATE_START)==1)%>%
+  drop_na(roll_beta)
+  
+  return(stock_data_modified)
+}
+
+"Descriptive Stats Function : count, mean,p1,p5, p25, p50, p75,p95,p99, std,skewness,kurtosis max, min"
+stats = function(dat){
+count_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(),funs(sum(!is.na(.))),.names = "count_{.col}"))
+mean_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), mean,na.rm = TRUE,.names = "mean_{.col}"))
+p1_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.01),na.rm = TRUE,.names = "p01_{.col}"))
+p5_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.05),na.rm = TRUE,.names = "p05_{.col}"))
+p25_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.25),na.rm = TRUE,.names = "p25_{.col}"))
+p50_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.5),na.rm = TRUE,.names = "p50_{.col}"))
+p75_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.75),na.rm = TRUE,.names = "p75_{.col}"))
+p95_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.95),na.rm = TRUE,.names = "p95_{.col}"))
+p99_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), quantile,probs = c(0.99),na.rm = TRUE,.names = "p95_{.col}"))
+std_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), sd,na.rm = TRUE,.names = "std_{.col}"))
+skewness_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), skewness, na.rm = TRUE,.names = "skew_{.col}"))
+kurtosis_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(),kurtosis, na.rm = TRUE,.names = "kurt_{.col}"))
+max_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), max,na.rm = TRUE,.names = "max_{.col}"))
+min_group = dat %>%
+  group_by(BK_START)%>%
+  summarise(across(everything(), min,na.rm = TRUE,.names = "min_{.col}"))
+ return (list(count_group,mean_group,p1_group, p5_group, p25_group,p50_group, p75_group,p95_group,p99_group, std_group,skewness_group,kurtosis_group,max_group,min_group))
+}
+
+"Correlation Heatmap Function"
+get_heatmap = function(dat,columns,col_name){
+  corr = round(x = cor(dat[columns],use = "complete.obs"), digits = 2)
+  melted_corr = reshape2::melt(corr)
+  heatplot = ggplot(data = melted_corr, aes(x=Var1, y=Var2, fill = value)) +
+    geom_tile(color = "white")+
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5),axis.text.x = element_text(angle=45, hjust=1)) +
+    labs(title = paste0("Correlation Heatmap for ",col_name))+
+    coord_fixed()
+  ggplotly(heatplot)
+}
+
+"Multiple Line chart Function to draw line chart across time with the Macro economic variables"
+
+plot_multiple_line_chart = function(dat1, title_type,y1_type,macro_flag = 0) {
+  if(macro_flag == 0){
+    cols_taken = ncol(dat1)
+  }else{
+    cols_taken = ncol(dat1)-1
+  }
+  plot_y <- dat1 %>% plot_ly()
+  for(i in c(2:ncol(dat1))) {
+    if (i <= cols_taken) {
+      x = plot_y %>% add_trace(x = ~BK_START, y=dat1[[i]],  mode="bar" ,type = 'scatter', name=colnames(dat1)[i], yaxis='y1')
+    } else if(macro_flag != 0){
+      x = plot_y %>% add_trace(x = ~BK_START, y=dat1[[i]], mode="bar", type = 'scatter', name=colnames(dat1)[i], yaxis='y2') 
+    }
+    plot_y = x
+  }
+  if(macro_flag != 0)
+  {
+      plot_y %>% 
+      layout(title = paste0(title_type,"(LHS) vs Macro economic variable (RHS)"),
+         barmode   = 'relative', 
+         xaxis     = list(title=''),
+         margin    = list(l = 75, r = 75, b = 50, t = 50, pad = 4),
+         xaxis     = list(title = ""),
+         yaxis     = list(side = 'left', 
+                       title = y1_type, 
+                       showgrid = FALSE, 
+                       zeroline = TRUE, 
+                       color = 'steelblue'),
+         yaxis2    = list(side = 'right', 
+                       overlaying = "y", 
+                       title = colnames(dat1)[ncol(dat1)], 
+                       showgrid = TRUE, 
+                       zeroline = FALSE,
+                       # ticksuffix = "%", 
+                       color = "#ffa500"),
+         legend = list(traceorder = 'reversed',orientation = "h"))
+  }
+  else{
+    plot_y %>% 
+    layout(title = paste0(title_type," Data"),
+       barmode   = 'relative', 
+       xaxis     = list(title=''),
+       margin    = list(l = 75, r = 75, b = 50, t = 50, pad = 4),
+       xaxis     = list(title = ""),
+       yaxis     = list(side = 'left', 
+                       title = y1_type, 
+                       showgrid = FALSE, 
+                       zeroline = TRUE, 
+                       color = 'steelblue'),
+       legend = list(traceorder = 'reversed',orientation = "h"))
+  }
+}
+#Compute beta using the formula
+beta_compute = function(x,y){
+  cov(x,y)/var(y)
+}
+#Function for Ranking the Portfolios and Newey-West T-Stats
+decile_rank_portfolio <- function(df,beta,rank) {
+  df<- df %>%
+        mutate(BK_START = floor_date(DATE_START, unit = "year")) %>%
+        left_join(beta,by = c("CUSIP","BK_START")) %>%
+        filter(rank_dec ==rank)
+
+  df<- df %>% 
+    select(c(DATE_START,CUSIP,EXCESS_RET,MKT_PREM,MCAP)) %>%
+    group_by(DATE_START) %>%
+    summarise(mean_excess_return = mean(EXCESS_RET),
+              mkt_excess_return = last(MKT_PREM),
+              total_cap = sum(MCAP),
+              weighted_returns = weighted.mean(EXCESS_RET,MCAP, na.rm = TRUE))
+  
+  model = lm(cbind(mean_excess_return,weighted_returns) ~ mkt_excess_return, data = df)
+  k = coeftest(model, vcov.=NeweyWest(model, lag=5, adjust=TRUE, verbose=TRUE))
+  ifelse(t(k)[4]<=0.05,print("CAPM Alpha is significant for Equal Weighted Portfolio"),print("CAPM Alpha is not significant for Equal Weighted Portfolio"))
+  ifelse(t(k)[12]<=0.05,print("CAPM Alpha is significant for Value Weighted Portfolio"),print("CAPM Alpha is not significant for Value Weighted Portfolio"))
+  df<-df %>% 
+      mutate(YEAR_START = as.Date(cut(DATE_START, breaks = "12 month"),)) %>%
+      arrange(DATE_START)%>%
+      group_by(YEAR_START) %>%
+      mutate(Beta = beta_compute(mean_excess_return, mkt_excess_return),
+             Weighted_Beta = beta_compute(weighted_returns, mkt_excess_return),
+             EQUAL_WEIGHTED_PF_RET = (CUMULATIVE_PRODUCT(1+mean_excess_return)-1),
+             VALUE_WEIGHTED_PF_RET = (CUMULATIVE_PRODUCT(1+weighted_returns))-1) %>%
+      select(YEAR_START,Beta,Weighted_Beta,EQUAL_WEIGHTED_PF_RET,VALUE_WEIGHTED_PF_RET)%>%
+      slice(n())%>%
+      ungroup()%>%
+      mutate(YEAR_START = year(YEAR_START),
+             CUM_EQUAL_WEIGHTED_PF = CUMULATIVE_PRODUCT(1+EQUAL_WEIGHTED_PF_RET),
+             CUM_VALUE_WEIGHTED_PF = CUMULATIVE_PRODUCT(1+VALUE_WEIGHTED_PF_RET))%>%
+      select(YEAR_START,Beta,Weighted_Beta,CUM_EQUAL_WEIGHTED_PF,CUM_VALUE_WEIGHTED_PF,EQUAL_WEIGHTED_PF_RET,VALUE_WEIGHTED_PF_RET)
+  return (df)
+}
+```
+
+
+###Reading the Monthly Data 
+```{r}
+"Reading the monthly data first for Q2 and then carrying out the daily analysis for Q1, Q3 onwards"
+
+path = "D:/anshul stuffs/gatech/material/MFI_Assignment/Assignment_5/"
+monthly_data = fread(paste0(path,"msf_new2.csv"))
+#Subsetting the data and taking only data from 1995 onwards
+monthly_data = monthly_data%>%
+  tibble()%>%
+  filter(DATE>="19941231")
+  
+mse_names = read.csv(paste0(path,"msenames.csv"))
+
+```
+
+###Modifying the Monthly Data and mapping Industry
+```{r}
+
+mse_names_unique = mse_names%>%
+  distinct(CUSIP,.keep_all= TRUE)
+
+#Parsing the dates
+monthly_data_modified = monthly_data%>%
+  merge(mse_names_unique[c("CUSIP","COMNAM","EXCHCD","SICCD")],by = "CUSIP",all.x = TRUE)%>%
+  arrange(CUSIP,DATE)%>%
+  drop_na(PRC)%>%
+  filter(SHRCD %in% c(10,11))%>%
+  mutate(DATE = as.Date(parse_date_time(DATE, orders = "Ymd")),MKTCAP = abs(PRC*SHROUT),DATE_START = floor_date(DATE, unit = "month"))
+
+#Mapping Industry
+monthly_data_modified = monthly_data_modified%>%
+  mutate(INDUSTRY = if_else(SICCD %in% c(1:999),"Agriculture, Forestry and Fishing",if_else(SICCD %in% c(1000:1499),"Mining",if_else(SICCD %in% c(1500:1799),"Construction",if_else(SICCD %in% c(2000:3999),"Manufacturing",if_else(SICCD %in% c(4000:4999),"Transportation and other Utilities",if_else(SICCD %in% c(5000:5199),"Wholesale Trade",if_else(SICCD %in% c(5200:5999),"Retail Trade",if_else(SICCD %in% c(6000:6799),"Finance, Insurance and Real Estate",if_else(SICCD %in% c(7000:8999),"Services",if_else(SICCD %in% c(9000:9999),"Public Administration","Others")))))))))))
+
+```
+
+
+###Fama French Extract RF Monthly
+```{r}
+"Extracting the Risk Free Rate and calculating the Excess Return and Risk Premium"
+risk_free_data = read.csv(paste0(path,"F-F_Research_Data_Factors.csv"),skip = 2)
+names(risk_free_data)[1] = "DATE_START"
+risk_free_data = risk_free_data%>%
+  mutate(DATE_START = as.Date(parse_date_time(DATE_START, orders = "Ym")))%>%
+  mutate_if(is.character, as.numeric)
+
+monthly_data_modified_risk_free = monthly_data_modified%>%
+  merge(risk_free_data[c("DATE_START","RF")],by = "DATE_START")%>%
+  arrange(CUSIP,DATE_START)
+monthly_data_modified_risk_free = monthly_data_modified_risk_free[monthly_data_modified_risk_free$RET!="C",]
+
+#calculating the excess returns over RF and Risk Premium over Market
+monthly_data_modified_risk_free = monthly_data_modified_risk_free%>%
+  mutate(across(c(RET),as.numeric),EXCESS_RETURN = RET - RF/100,MKT_PREM = VWRETD - RF/100)
+
+regression_data = monthly_data_modified_risk_free%>%
+  select(DATE_START,CUSIP,EXCESS_RETURN,MKT_PREM)
+
+stock_data = monthly_data_modified_risk_free%>%
+  select(DATE_START,CUSIP,RET,VWRETD)
+
+#calculating the rolling beta for 12M,24M,36M
+beta_yearly = beta_calculation(stock_data,12)
+beta_bi_annually = beta_calculation(stock_data,24)
+beta_tri_annually = beta_calculation(stock_data,36)
+
+
+```
+
+###Reading the Daily Data (Q1)
+```{r}
+"Extract data for the daily and loading the french daily data"
+daily_data<- fread(paste0(path,"dsf_new.csv"),select=c("DATE","CUSIP","SHRCD","HSICCD","RET","VWRETD","PRC","SHROUT"),header = T) %>% tibble()
+
+daily_data<- daily_data %>% 
+              filter(SHRCD==10 | SHRCD==11, DATE > 19960000) %>% 
+              mutate(RET = as.numeric(RET),
+                     VWRETD = as.numeric(VWRETD),
+                     MCAP = abs(PRC)*SHROUT) %>%
+              drop_na(PRC,RET) %>%
+              select(-c(SHRCD,PRC,SHROUT)) %>% 
+              mutate(DATE = as.Date(parse_date_time(DATE, orders = "Ymd")))%>%
+              rename(DATE_START = DATE)
+
+#Loading daily RF from French data
+french_daily_rf_data = read.csv(paste0(path,"french_data.csv"))
+french_daily_rf_data = french_daily_rf_data%>% 
+  tibble()%>% 
+  mutate(DATE = as.Date(parse_date_time(DATE, orders = "dmy")))%>%
+  arrange(DATE)%>% 
+  rename(RF = rf,DATE_START = DATE)
+
+daily_data<- list(daily_data,french_daily_rf_data) %>% reduce(left_join, by="DATE_START")
+
+
+# Mkt excess return
+daily_data <- daily_data %>% 
+              mutate(RF = as.numeric(RF))
+#Copying the data for the welch winsorising method (Q3)
+daily_data_welch = copy(daily_data)
+```
+
+###Creating the Stock Beta Using the Daily Data
+```{r}
+"calculating the Stock Betas over years"
+#Q1
+#Computing the betas based on lookback period(1M,3M,6M,12M,24M)
+daily_data <- daily_data %>% mutate(BK_START = as.Date(cut(DATE_START, breaks = "year"),),
+                     BK_START = BK_START %m+% years(1)) %>% ungroup()
+
+betas_1_year <-  beta_daily_function(daily_data,"RET","VWRETD", "beta_1_year")
+ 
+                
+all_beta_table <- daily_data %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "2 year"),),
+                     BK_START = BK_START %m+% years(2)) %>%
+              group_by(CUSIP, BK_START) %>% 
+              beta_daily_function("RET","VWRETD", "beta_2_year")
+
+
+all_beta_table <- merge(betas_1_year, all_beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+
+daily_data <- daily_data %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "6 month"),),
+                     MON = month(DATE_START)) %>%
+              filter(MON > 6) %>%
+              mutate(BK_START = BK_START %m+% months(6))
+
+beta_table <- beta_daily_function(daily_data,"RET","VWRETD", "beta_6_month")
+all_beta_table <- merge(all_beta_table, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+daily_data <- daily_data %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "3 month"),),
+                     MON = month(DATE_START)) %>%
+              filter(MON > 9) %>%
+              mutate(BK_START = BK_START %m+% months(3))
+
+beta_table <- beta_daily_function(daily_data,"RET","VWRETD", "beta_3_month")
+all_beta_table <- merge(all_beta_table, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+daily_data <- daily_data %>% 
+             mutate(BK_START = as.Date(cut(DATE_START, breaks = "month"),),
+             MON = month(DATE_START)) %>%
+             filter(MON > 11) %>%
+             mutate(BK_START = BK_START %m+% months(1)) 
+
+beta_table <- beta_daily_function(daily_data,"RET","VWRETD", "beta_1_month")
+all_beta_table <- merge(all_beta_table, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+all_beta_table = all_beta_table %>% select(CUSIP,BK_START,beta_1_month,beta_3_month,beta_6_month,beta_1_year,beta_2_year)
+
+c(count_beta,mean_beta,p1_beta,p5_beta,p25_beta,p50_beta, p75_beta,p95_beta,p99_beta, std_beta,skew_beta,kurt_beta,max_beta,min_beta)%<-%stats(all_beta_table %>%select(-c(CUSIP)))
+#Removing the data from the memory to free up space
+rm(daily_data,beta_table)
+```
+
+###Welch Winsorisation Beta
+```{r}
+"Restricting the outliers for the data and capping them"
+#Q3
+daily_data_welch <- daily_data_welch %>% 
+              drop_na(RET, VWRETD) %>%
+              mutate(WELCH_RET = ifelse(VWRETD > 0, 
+              ifelse(RET > 4*VWRETD , 4*VWRETD, 
+              ifelse(RET < -2*VWRETD, -2*VWRETD, 
+              RET)),ifelse(RET < 4*VWRETD,4*VWRETD,
+              ifelse(RET > -2*VWRETD, -2*VWRETD, RET))))
+
+
+#Adding industry code to the stock data which is later use to anlayse Beta for the industry
+daily_data_welch = daily_data_welch%>%
+  mutate(INDUSTRY = if_else(HSICCD %in% c(1:999),"Agriculture, Forestry and Fishing",if_else(HSICCD %in% c(1000:1499),"Mining",if_else(HSICCD %in% c(1500:1799),"Construction",if_else(HSICCD %in% c(2000:3999),"Manufacturing",if_else(HSICCD %in% c(4000:4999),"Transportation and other Utilities",if_else(HSICCD %in% c(5000:5199),"Wholesale Trade",if_else(HSICCD %in% c(5200:5999),"Retail Trade",if_else(HSICCD %in% c(6000:6799),"Finance, Insurance and Real Estate",if_else(HSICCD %in% c(7000:8999),"Services",if_else(HSICCD %in% c(9000:9999),"Public Administration","Others")))))))))))
+#Create copy of data used for later purposes of CAPM
+daily_data_welch_capm = copy(daily_data_welch)
+
+#Beta Calculation for winsorised daily series
+daily_data_welch <- daily_data_welch %>% mutate(BK_START = as.Date(cut(DATE_START, breaks = "year"),),BK_START = BK_START %m+% years(1)) %>% ungroup()
+
+betas_1_year <-  beta_daily_function(daily_data_welch,"WELCH_RET","VWRETD", "beta_1_year_welch")
+ 
+##1 yr beta having industry data which is used later for the analysis. I have used 1 year beta because it's long enough and we have enough data points for good enough calculation.Very short term look-back period for Beta calculation is not reliable enough. We can also take 2 year look-back for beta but the computation time is more for the larger period look-back 
+betas_1_year_industry = merge(betas_1_year, distinct(daily_data_welch[c("CUSIP","INDUSTRY")],CUSIP,.keep_all = TRUE), by = c("CUSIP"), all.x = TRUE)
+##
+
+all_beta_table_welch <- daily_data_welch %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "2 year"),),
+                     BK_START = BK_START %m+% years(2)) %>%
+              group_by(CUSIP, BK_START) %>% 
+              beta_daily_function("WELCH_RET","VWRETD", "beta_2_year_welch")
+
+
+all_beta_table_welch <- merge(betas_1_year, all_beta_table_welch, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+
+daily_data_welch <- daily_data_welch %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "6 month"),),
+                     MON = month(DATE_START)) %>%
+              filter(MON > 6) %>%
+              mutate(BK_START = BK_START %m+% months(6))
+
+beta_table <- beta_daily_function(daily_data_welch,"WELCH_RET","VWRETD", "beta_6_month_welch")
+all_beta_table_welch <- merge(all_beta_table_welch, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+daily_data_welch <- daily_data_welch %>% 
+              mutate(BK_START = as.Date(cut(DATE_START, breaks = "3 month"),),
+                     MON = month(DATE_START)) %>%
+              filter(MON > 9) %>%
+              mutate(BK_START = BK_START %m+% months(3))
+
+beta_table <- beta_daily_function(daily_data_welch,"WELCH_RET","VWRETD", "beta_3_month_welch")
+all_beta_table_welch <- merge(all_beta_table_welch, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+
+daily_data_welch <- daily_data_welch %>% 
+             mutate(BK_START = as.Date(cut(DATE_START, breaks = "month"),),
+             MON = month(DATE_START)) %>%
+             filter(MON > 11) %>%
+             mutate(BK_START = BK_START %m+% months(1)) 
+
+beta_table <- beta_daily_function(daily_data_welch,"WELCH_RET","VWRETD", "beta_1_month_welch")
+all_beta_table_welch <- merge(all_beta_table_welch, beta_table, by = c("CUSIP","BK_START"), all.x = TRUE)
+all_beta_table_welch = all_beta_table_welch %>% select(CUSIP,BK_START,beta_1_month_welch,beta_3_month_welch,beta_6_month_welch,beta_1_year_welch,beta_2_year_welch)
+
+#Releasing space to avoid memory error
+rm(daily_data_welch)
+```
+
+###Descriptive Stats and plot for Beta by Industry Across Time
+```{r}
+"Descriptive Stats for different look-backs for Daily Data Beta calculation in Q3(Wench Winsorisation)"
+#Descriptive stats
+c(count_data,mean_data,p1_data,p5_data,p25_data,p50_data, p75_data,p95_data,p99_data, std_data,skew_data,kurt_data,max_data,min_data)%<-%stats(all_beta_table_welch %>%select(-c(CUSIP)))
+
+#Correlation Heatmap for the above mean key variables over time
+get_heatmap(mean_data,colnames(mean_data)[2:length(colnames(mean_data))],"Analysis")
+
+
+#Mean beta for each industry. I have picked 1 year beta for the calculations on daily data. The reason for that is stated above
+mean_beta_industry = betas_1_year_industry%>%
+  group_by(BK_START,INDUSTRY)%>%
+  summarise_at(vars(beta_1_year_welch), funs(mean(., na.rm=TRUE)))%>%
+  rename(mean_beta = beta_1_year_welch)%>%
+  pivot_wider(names_from = INDUSTRY, values_from = c(mean_beta))
+
+#Plotting the betas over time
+plot_multiple_line_chart(mean_beta_industry,"Mean Betas Over Time For Each Industry","Beta")
+```
+
+###Portfolio Construction (Equal Weighted and Value Weighted) and Newey-West T-Statistic
+```{r}
+"Calculating the decile based equal and value weighted portfolios adn testing the CAPM Null-Hypothesis using Newey-West t-statistic"
+#CAPM, Beta, and Stock Returns
+# Decile based portfolios, with 1 being lowest ranked Beta and 10 being highest Beta Stocks
+beta_ranked<-betas_1_year %>%
+ group_by(BK_START) %>%
+ mutate(rank_dec = ntile(beta_1_year_welch,10))
+
+daily_data_welch_capm <- daily_data_welch_capm %>% 
+              mutate(EXCESS_RET = RET - RF,
+                    MKT_PREM = VWRETD - RF)
+#Output is Dataframe having Equal and Value Weighted Portfolio Betas over Years along with the Cumulative Returns for the two portfolios...Each Portfolio has beta for each year..
+rank1_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,1)
+rank2_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,2)
+rank3_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,3)
+rank4_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,4)
+rank5_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,5)
+rank6_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,6)
+rank7_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,7)
+rank8_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,8)
+rank9_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,9)
+rank10_portfolio_beta<- decile_rank_portfolio(daily_data_welch_capm,beta_ranked,10)
+
+#Average Beta Equal Weighted Portfolio and Value Weighted Portfolio combined from 1995-2020
+beta_df = data.frame(Decile_Rank = numeric(0),Average_Beta_Equal_Weighted_Portfolio = numeric(0),
+                     Average_Beta_Value_Weighted_Portfolio = numeric(0))
+#Volatility for all decile Portfolios (Equal and Value Weighted)
+vol_df = data.frame(Decile_Rank = numeric(0),Average_Vol_Equal_Weighted_Portfolio = numeric(0),
+                     Average_Vol_Value_Weighted_Portfolio = numeric(0))
+for (i in 1:10){
+  beta_df[i,] = c(i,mean(get(paste0("rank",i,"_portfolio_beta"))$Beta),mean(get(paste0("rank",i,"_portfolio_beta"))$Weighted_Beta))
+  vol_df[i,] = c(i,sd(get(paste0("rank",i,"_portfolio_beta"))$EQUAL_WEIGHTED_PF_RET),sd(get(paste0("rank",i,"_portfolio_beta"))$VALUE_WEIGHTED_PF_RET))
+  
+}
+
+#Difference in Return between Rank 1 and Rank 10 Equal and Value Weighted Portfolios
+
+difference_returns_portfolio = data.frame(cbind(rank1_portfolio_beta$YEAR_START,rank10_portfolio_beta$EQUAL_WEIGHTED_PF_RET - rank1_portfolio_beta$EQUAL_WEIGHTED_PF_RET,rank10_portfolio_beta$VALUE_WEIGHTED_PF_RET - rank1_portfolio_beta$VALUE_WEIGHTED_PF_RET))
+
+names(difference_returns_portfolio) = c("YEAR_START","EQUAL_WEIGHTED_PORTFOLIO","VALUE_WEIGHTED_PORTFOLIO")
+
+#Plotting only Rank 1 Cumulative and Value Weighted Portfolios Cumulative Returns in terms of times(say 2x,3x..etc)
+plot_multiple_line_chart(rank1_portfolio_beta%>%
+                         select(c(YEAR_START,CUM_EQUAL_WEIGHTED_PF,CUM_VALUE_WEIGHTED_PF))%>%
+                         rename(BK_START = YEAR_START),
+                         "Cumulative Returns for the Portfolio","")
+
+#Plotting only Rank 10 Cumulative and Value Weighted Portfolios Cumulative Returns in terms of times(say 2x,3x..etc)
+plot_multiple_line_chart(rank10_portfolio_beta%>%
+                         select(c(YEAR_START,CUM_EQUAL_WEIGHTED_PF,CUM_VALUE_WEIGHTED_PF))%>%
+                         rename(BK_START = YEAR_START),
+                         "Cumulative Returns for the Portfolio","")
+
+```
